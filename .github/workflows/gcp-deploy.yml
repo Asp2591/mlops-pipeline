@@ -1,0 +1,77 @@
+
+name: GCP CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: your-gcp-project-id
+  REGION: asia-south1
+  GAR_REPOSITORY: ml-repo
+  IMAGE_NAME: ml-app
+  CLUSTER_NAME: ml-gke-cluster
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+    - name: Setup GCloud
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker
+      run: gcloud auth configure-docker $REGION-docker.pkg.dev
+
+    - name: Build Docker Image
+      run: |
+        docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$IMAGE_NAME:${{ github.sha }} .
+
+    - name: Push Docker Image
+      run: |
+        docker push $REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$IMAGE_NAME:${{ github.sha }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      run: terraform init
+      working-directory: terraform
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve -var="project_id=$PROJECT_ID"
+      working-directory: terraform
+
+    - name: Get GKE Credentials
+      run: |
+        gcloud container clusters get-credentials $CLUSTER_NAME --region $REGION
+
+    - name: Deploy App to GKE
+      run: |
+        kubectl apply -f k8s/
+
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+
+    - name: Add Prometheus Repo
+      run: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
+
+    - name: Install Monitoring Stack
+      run: |
+        helm upgrade --install monitoring prometheus-community/kube-prometheus-stack         --namespace monitoring         --create-namespace
